@@ -1,4 +1,7 @@
 *
+!serialcomtest
+!flashdump
+!libraries/SPIFlash-master
 !arduino*
 !rfduino*
 !.gitignore
