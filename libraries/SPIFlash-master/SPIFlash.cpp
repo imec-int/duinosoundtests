@@ -72,6 +72,8 @@ uint16_t SerialBuffer::numberOfElements(void) {
 
 
 FlashBuffer::FlashBuffer(uint8_t pin) : flash(pin, 0x140) {
+  // initialize indexTable properly
+  memcpy(indexTable + 1, indexTable, 244); // copy the first FF to all other array elements
   // read bytes at block beginnings and check header
   flash.initialize();
   currentItemAddress = 0;
@@ -93,7 +95,7 @@ FlashBuffer::FlashBuffer(uint8_t pin) : flash(pin, 0x140) {
   uint8_t indexTableWithHeader[249]; //if we're on a block boundary we already skipped the header, so 35 * 7 + itemHeader (=4)
   flash.readBytes(latestItemAddress, indexTableWithHeader, 4);
   if(indexTableWithHeader[0] == 0x7F) { //largest number with most significant bit (=no partial item) 0 -> this is fixed id for index table by agreement
-    memcpy(indexTable, indexTableWithHeader + 4, 245);
+    memmove(indexTable, indexTableWithHeader + 4, 245);
   }
 }
 
@@ -156,6 +158,7 @@ void FlashBuffer::setPauseCallback(void (*aFunc) ()) {
 
 void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &serialBuffer) {
     // we start at beginning of page
+  uint32_t originalLength = length;
   uint32_t startAddress = (uint32_t)nextPageId << 8;
   uint32_t addressInIndex = startAddress;
   uint16_t n;
@@ -244,7 +247,7 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
       indexTable[i * 7] = id;
       for(uint8_t j = 0; j < 3; j++) {
         indexTable[i * 7 + 1 + j] = addressInIndex >> 16 - j * 8;
-        indexTable[i * 7 + 4 + j] = length >> 16 - j * 8;
+        indexTable[i * 7 + 4 + j] = originalLength >> 16 - j * 8;
       }
       slotAvailable = true;
       break;
@@ -255,7 +258,7 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
     indexTable[238] = id;
     for(uint8_t j = 0; j < 3; j++) {
       indexTable[238 + 1 + j] = addressInIndex >> 16 - j * 8;
-      indexTable[238 + 4 + j] = length >> 16 - j * 8;
+      indexTable[238 + 4 + j] = originalLength >> 16 - j * 8;
     }
   }
   // write indexTable to next page!
@@ -296,6 +299,26 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
   }
   flash.unselect();
   nextPageId = startAddress / 256 + 1;
+}
+
+uint32_t FlashBuffer::getItemLength(uint8_t id) {
+  for(uint8_t i = 0; i < 245; i++) {
+    Serial.print(indexTable[i], HEX);
+  }
+  Serial.println();
+  uint32_t length = 0;
+  uint32_t address = 0;
+  for(uint8_t i = 34; i >= 0; i--) { //loop backwards; more recent items were added to the back
+    if(indexTable[i * 7] == id) {
+      for(uint8_t j = 0; j < 3; j++) {
+        address |= indexTable[i * 7 + 1 + j] << 16 - j * 8;
+        length |= indexTable[i * 7 + 4 + j] << 16 - j * 8;
+      }
+      break;
+    }
+  }
+  if(address == 0 && length == 0) return 0; // address itself can be zero; first sector
+  return length;
 }
 
 int FlashBuffer::readItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer) {

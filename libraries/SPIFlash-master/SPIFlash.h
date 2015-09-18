@@ -143,6 +143,7 @@ public:
   FlashBuffer(uint8_t pin);
   void writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &serialBuffer);
   int readItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer);
+  uint32_t getItemLength(uint8_t id);
   void print();
   void setResumeCallback(void (*aFunc) ());
   void setPauseCallback(void (*aFunc)());
@@ -153,7 +154,7 @@ private:
   uint16_t nextPageId;
   SPIFlash flash;
   uint16_t checkForLatestItemAddress(uint32_t address);
-  uint8_t indexTable[245] = {0xFF}; //35 * 7; still fits in 1 page
+  uint8_t indexTable[245] = {0xFF}; //35 * 7; still fits in 1 page | the 0xFF only initializes the first element, which sucks -> copy its value with memset in constructor
   void (*resumeCallback) ();
   void (*pauseCallback) ();
 };
