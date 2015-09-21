@@ -93,9 +93,9 @@ FlashBuffer::FlashBuffer(uint8_t pin) : flash(pin, 0x140) {
   checkForLatestItemAddress(((uint32_t)latestBlockId << 16) + 1); //add 1 to skip block header
   // normally we're on the last iteration of the index table if we look at the last item
   uint8_t indexTableWithHeader[249]; //if we're on a block boundary we already skipped the header, so 35 * 7 + itemHeader (=4)
-  flash.readBytes(latestItemAddress, indexTableWithHeader, 4);
+  flash.readBytes(latestItemAddress, indexTableWithHeader, 249);
   if(indexTableWithHeader[0] == 0x7F) { //largest number with most significant bit (=no partial item) 0 -> this is fixed id for index table by agreement
-    memmove(indexTable, indexTableWithHeader + 4, 245);
+    memcpy(indexTable, indexTableWithHeader + 4, 245);
   }
 }
 
@@ -241,6 +241,8 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
   // page has 256 bytes, 4 are taken by its own header. Maybe one by a block header (if on new block)
   // 7 bytes per indexed item (id(1)|adres(3)|length(3)) -> room for (256-5) / 7 items = 35
   boolean slotAvailable = false;
+  // restore id in case block boundaries where crossed
+  id = id & 0x7F;
   for(uint8_t i = 0; i < 35; i++) {
     // check for empty slot or overwrite existing entry if already present
     if(indexTable[i * 7] == 0xFF || indexTable[i * 7] == id) {
@@ -254,7 +256,7 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
     }
   }
   if(!slotAvailable) {
-    memcpy(indexTable, indexTable + 7, 238); // shift array one element to the left by copying all but one items
+    memmove(indexTable, indexTable + 7, 238); // shift array one element to the left by copying all but one items
     indexTable[238] = id;
     for(uint8_t j = 0; j < 3; j++) {
       indexTable[238 + 1 + j] = addressInIndex >> 16 - j * 8;
@@ -302,12 +304,21 @@ void FlashBuffer::writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &se
 }
 
 uint32_t FlashBuffer::getItemLength(uint8_t id) {
-  for(uint8_t i = 0; i < 245; i++) {
-    Serial.print(indexTable[i], HEX);
-  }
-  Serial.println();
   uint32_t length = 0;
+  for(uint8_t i = 34; i >= 0; i--) { //loop backwards; more recent items were added to the back
+    if(indexTable[i * 7] == id) {
+      for(uint8_t j = 0; j < 3; j++) {
+        length |= indexTable[i * 7 + 4 + j] << 16 - j * 8;
+      }
+      break;
+    }
+  }
+  return length;
+}
+
+uint8_t FlashBuffer::readItemAtIndex(uint8_t id, uint32_t index) {
   uint32_t address = 0;
+  uint32_t length = 0;
   for(uint8_t i = 34; i >= 0; i--) { //loop backwards; more recent items were added to the back
     if(indexTable[i * 7] == id) {
       for(uint8_t j = 0; j < 3; j++) {
@@ -317,8 +328,58 @@ uint32_t FlashBuffer::getItemLength(uint8_t id) {
       break;
     }
   }
-  if(address == 0 && length == 0) return 0; // address itself can be zero; first sector
-  return length;
+  if((address & 65535) == 0) address++;
+  address += 4;
+  address += ((index >> 16) - (address >> 16)) * 5; // aantal blockboundaries * 5 bijtellen (delen door 65536 of 2^16)
+  address += index;
+  return flash.readByte(address);
+}
+
+int FlashBuffer::fastReadItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer) {
+  int result = -1;
+  uint32_t address = 0;
+  length = 0;
+  for(uint8_t i = 34; i >= 0; i--) { //loop backwards; more recent items were added to the back
+    if(indexTable[i * 7] == id) {
+      for(uint8_t j = 0; j < 3; j++) {
+        address |= indexTable[i * 7 + 1 + j] << 16 - j * 8;
+        length |= indexTable[i * 7 + 4 + j] << 16 - j * 8;
+      }
+      break;
+    }
+  }
+  if(address == 0 && length == 0) return -1; // address itself can be zero; first sector
+  if((address & 65535) == 0) address++; //skip blockheader
+  uint8_t idInFlash = flash.readByte(address);
+  if(idInFlash != id) return result; //check whether we're at the correct item if not return -1.
+  // no speed advantage in using fastread so read byte per byte since rfduino is slow
+  // we already got length from indexTable so skip it in flash
+  else result = id;
+  address += 4;
+  uint32_t bytesRead = 0;
+  flash.command(SPIFLASH_ARRAYREADLOWFREQ);
+  SPI.transfer(address >> 16);
+  SPI.transfer(address >> 8);
+  SPI.transfer(address);
+  // SPI.transfer(0); //don't care
+  while(bytesRead < length) {
+    uint8_t data = SPI.transfer(0);
+    // serialBuffer.add(data);
+    while(serialBuffer.add(data) == -1);
+    address++;
+    bytesRead++;
+    if((address & 65535) == 0) {
+      address += 5;
+      flash.unselect();
+      flash.command(SPIFLASH_ARRAYREADLOWFREQ);
+      SPI.transfer(address >> 16);
+      SPI.transfer(address >> 8);
+      SPI.transfer(address);
+      // SPI.transfer(0); //don't care
+    }
+  }
+  flash.unselect();
+  return result;
 }
 
 int FlashBuffer::readItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer) {
@@ -347,7 +408,7 @@ int FlashBuffer::readItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &s
     if((address & 65535) == 0) address += 5; //skip blockheader and rewrite of item header
     uint8_t data = flash.readByte(address);
     while(serialBuffer.add(data) == -1) {
-      delay(200);
+      // delay(200);
     }
     address++;
     bytesRead++;
@@ -388,6 +449,7 @@ void SPIFlash::select() {
   SPI.setBitOrder(MSBFIRST);
   // SPI.setClockDivider(SPI_CLOCK_DIV4); //decided to slow down from DIV2 after SPI stalling in some instances, especially visible on mega1284p when RFM69 and FLASH chip both present
   // setClockDivider has empty implementation on RFduino but default is 4Mhz (equals DIV4)
+  SPI.setFrequency(4000);
   SPI.begin();
 #endif
   digitalWrite(_slaveSelectPin, LOW);
@@ -631,3 +693,12 @@ void SPIFlash::end() {
 //   // Serial.print('vlo');
 //   callback();
 // }
+
+// void Test::doSomething() {
+//   memcpy(indexTable + 1, indexTable, 3);
+//   for(uint8_t i = 0; i < 4; i++) {
+//     Serial.print(indexTable[i], HEX);
+//     Serial.println();
+//   }
+// }
+

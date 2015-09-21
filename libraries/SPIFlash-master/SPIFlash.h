@@ -143,6 +143,8 @@ public:
   FlashBuffer(uint8_t pin);
   void writeItemToFlash(uint8_t id, uint32_t length, SerialBuffer &serialBuffer);
   int readItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer);
+  int fastReadItemFromFlash(uint8_t id, uint32_t &length, SerialBuffer &serialBuffer);
+  uint8_t readItemAtIndex(uint8_t id, uint32_t index);
   uint32_t getItemLength(uint8_t id);
   void print();
   void setResumeCallback(void (*aFunc) ());
@@ -163,8 +165,10 @@ private:
 // public:
 //   void setCallback(void (*aFunc) ());
 //   void fireCallback();
+//   void doSomething();
 // private:
 //   void (*callback) ();
+//   uint8_t indexTable[4] = {0xFF};
 // };
 
 #endif
